@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "get_eo"
+version = "0.1.0"
+description = "Earth-observation and driver data (Sentinel-2, ECOSTRESS, ERA5, SoilGrids) as xarray, for crop growth models"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [
+    {name = "Jose Gomez-Dans", email = "jgomezdans@gmail.com"},
+    {name = "Feng Yin", email = "ucfafyi@ucl.ac.uk"},
+    {name = "P. Lewis"},
+]
+keywords = ["earth observation", "sentinel-2", "ecostress", "era5", "soilgrids", "xarray", "crop model"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "xarray",
+    "dask[array]",
+    "rasterio",
+    "rioxarray",
+    "pyproj",
+    "shapely",
+    "pystac-client",
+    "requests",
+    "zarr<3",
+    "numcodecs",
+]
+
+[project.optional-dependencies]
+gee = ["earthengine-api", "xee"]      # source="gee" (Sentinel-2, ERA5-Land)
+cdse = ["boto3"]                      # source="cdse" (Sentinel-2)
+cds = ["cdsapi"]                      # open_era5(source="cds")
+all = ["earthengine-api", "xee", "boto3", "cdsapi"]
+dev = ["pytest", "pytest-cov", "ruff", "pvlib"]
+
+[project.urls]
+Documentation = "https://github.com/jgomezdans/get_eo#readme"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: needs internet access (and Earthdata login for ECOSTRESS)"]
+addopts = "-m 'not network'"
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
