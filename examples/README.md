@@ -5,8 +5,9 @@ irrigated maize-soybean rotation) over calendar year 2020:
 
 | What | Call | Result |
 |------|------|--------|
-| Hourly meteorology (ERA5) | `geo.open_era5(SITE, START, END)` | `time: 8784`, `t_air rh wind_speed solar_radiation precipitation p_atm co2_ppm` |
+| Hourly meteorology (ERA5) | `geo.open_era5(SITE, START, END)` | `time: 8784`, `t_air rh wind_speed solar_radiation precipitation p_atm co2_ppm` plus `t_soil_1..4` |
 | Soils (SoilGrids 250 m) | `geo.open_soilgrids(SITE, buffer_m=1500)` | `depth: 6, y: 13, x: 14`, clay/sand/silt/bdod/cfvo/soc/nitrogen/phh2o/cec |
+| Terrain (Copernicus GLO-30) | `geo.open_dem(SITE, buffer_m=1500)` | `elevation`, `slope`, `aspect` at 30 m; about 355 m, slope under 1 degree on average |
 | Sentinel-2 L2A + ECOSTRESS (lazy) | `geo.open_aoi(SITE, START, END, buffer_m=1500)` | dict with `s2` (144 scenes, 10 bands, 322 x 322 px at 10 m) and `ecostress` |
 
 ```python
@@ -15,7 +16,8 @@ import get_eo as geo
 SITE = (-96.4701, 41.1649)          # (lon, lat) of the flux tower
 START, END = "2020-01-01", "2020-12-31"
 
-met  = geo.open_era5(SITE, START, END)             # or source="gee" / "cds"
+met  = geo.open_era5(SITE, START, END, soil_temp=True)   # or source="gee" / "cds"
+dem  = geo.open_dem(SITE, buffer_m=1500)
 soil = geo.open_soilgrids(SITE, buffer_m=1500)
 obs  = geo.open_aoi(SITE, START, END, buffer_m=1500)   # source="aws" | "planetary" | "cdse" | "gee"
 s2, eco = obs["s2"], obs["ecostress"]

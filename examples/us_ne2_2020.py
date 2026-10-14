@@ -10,13 +10,17 @@ SITE = (-96.4701, 41.1649)          # (lon, lat) of the flux tower
 START, END = "2020-01-01", "2020-12-31"
 
 # --- Meteorology: hourly ERA5, same variables as the AmeriFlux reader ----
-met = geo.open_era5(SITE, START, END)            # source="openmeteo" (no account)
+met = geo.open_era5(SITE, START, END, soil_temp=True)   # source="openmeteo" (no account)
 # met = geo.open_era5(SITE, START, END, source="gee")   # ERA5-Land via Earth Engine
 print(met)
 
 # --- Soils: SoilGrids 250 m, six depths, conventional units --------------
 soil = geo.open_soilgrids(SITE, buffer_m=1500)
 print(soil[["clay", "sand", "soc", "bdod", "phh2o"]])
+
+# --- Terrain: Copernicus GLO-30 elevation, slope, aspect ----------------
+dem = geo.open_dem(SITE, buffer_m=1500)
+print(float(dem.elevation.mean()), "m a.s.l.,", float(dem.slope.mean()), "deg slope")
 
 # --- Sentinel-2 + ECOSTRESS: lazy, on the native tile grid ---------------
 # ECOSTRESS needs an Earthdata login in ~/.netrc.

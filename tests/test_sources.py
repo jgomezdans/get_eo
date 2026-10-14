@@ -240,7 +240,7 @@ def test_planetary_dedupe_collapses_reprocessed_baselines():
 
 
 # ------------------------------------------------------------------ ERA5
-from get_eo import _meteo, _soil   # noqa: E402
+from get_eo import _dem, _meteo, _soil   # noqa: E402
 
 
 def test_era5_unit_conversion():
@@ -397,3 +397,71 @@ def test_unreadable_metadata_item_is_dropped(monkeypatch, mtd_xml):
             items, "cdse", grid, bounds, ("B02", "B03"), None, 1024)
     assert [i.id for i in kept] == ["good_a", "good_b"]
     assert ang["sun_zen"].shape[0] == 2
+
+
+# ----------------------------------------------------------- soil temp, DEM
+def test_era5_soil_temperature_openmeteo(monkeypatch):
+    seen = {}
+
+    def fake(url, params, tries=4):
+        seen.update(params)
+        h = dict(time=["2022-07-15T00:00", "2022-07-15T01:00"],
+                 temperature_2m=[20.0, 21.0], relative_humidity_2m=[50, 60],
+                 wind_speed_10m=[1.0, 2.0], shortwave_radiation=[0.0, 0.0],
+                 precipitation=[0.0, 0.0], surface_pressure=[970.0, 971.0])
+        for i, n in enumerate(_meteo._OM_SOIL):
+            h[n] = [10.0 + i, 11.0 + i]
+        return dict(latitude=41.25, longitude=-96.5, hourly=h)
+
+    monkeypatch.setattr(_meteo, "_get_json", fake)
+    plain = _meteo.open_era5((-96.47, 41.16), "2022-07-15", "2022-07-15")
+    assert not [v for v in plain.data_vars if v.startswith("t_soil")]
+    ds = _meteo.open_era5((-96.47, 41.16), "2022-07-15", "2022-07-15",
+                          soil_temp=True)
+    assert all(n in seen["hourly"] for n in _meteo._OM_SOIL)
+    assert [v for v in ds.data_vars if v.startswith("t_soil")] == [
+        "t_soil_1", "t_soil_2", "t_soil_3", "t_soil_4"]
+    assert ds.t_soil_3.values.tolist() == [12.0, 13.0]
+    assert ds.t_soil_3.attrs["depth_top_cm"] == 28
+    assert ds.t_soil_4.attrs["depth_bottom_cm"] == 289
+
+
+def test_dem_tile_names():
+    assert _dem.tile_name(41, -97) == "Copernicus_DSM_COG_10_N41_00_W097_00_DEM"
+    assert _dem.tile_name(-5, 10) == "Copernicus_DSM_COG_10_S05_00_E010_00_DEM"
+    assert len(_dem.tiles_for(-97.1, 40.9, -95.9, 41.1)) == 6
+
+
+def test_slope_aspect_on_planes():
+    res = 30.0
+    cols = np.arange(8) * res
+    rise_east = np.tile(0.1 * cols, (8, 1))                  # +10 % toward east
+    s, a = _dem.slope_aspect(rise_east, res)
+    assert s[4, 4] == pytest.approx(np.degrees(np.arctan(0.1)), abs=1e-4)
+    assert a[4, 4] == pytest.approx(270.0, abs=1e-3)         # faces west
+    rise_north = np.tile((0.1 * cols)[::-1][:, None], (1, 8))  # rows run south
+    s, a = _dem.slope_aspect(rise_north, res)
+    assert a[4, 4] == pytest.approx(180.0, abs=1e-3)         # faces south
+    s, a = _dem.slope_aspect(np.full((5, 5), 100.0), res)
+    assert np.isnan(a).all() and (s == 0).all()
+
+
+def test_open_dem_grid_and_crop(monkeypatch):
+    got = {}
+
+    def fake(geom, crs, bounds, res, nx, ny):
+        got.update(nx=nx, ny=ny, bounds=bounds)
+        j, i = np.mgrid[0:ny, 0:nx]
+        return (300.0 + 0.5 * i * res).astype("float32")      # plane rising east
+
+    monkeypatch.setattr(_dem, "_read_aws", fake)
+    ds = _dem.open_dem((-96.4701, 41.1649), buffer_m=500)
+    assert ds.elevation.shape == (got["ny"] - 2, got["nx"] - 2)
+    assert float(ds.aspect.mean()) == pytest.approx(270.0, abs=1e-3)
+    assert float(ds.slope.mean()) == pytest.approx(
+        np.degrees(np.arctan(0.5)), abs=1e-3)
+    assert float(ds.x[1] - ds.x[0]) == 30.0
+    assert (float(ds.x[0]) - 15.0) % 30.0 == 0.0             # aligned to res
+    assert ds.rio.crs.to_epsg() == 32614
+    with pytest.raises(ValueError, match="Unknown DEM source"):
+        _dem.open_dem((0.0, 0.0), source="x", buffer_m=100)

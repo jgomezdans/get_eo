@@ -64,6 +64,13 @@ _CDS_SHORT = {"2m_temperature": "t2m", "2m_dewpoint_temperature": "d2m",
 VARIABLES = ("t_air", "rh", "wind_speed", "solar_radiation", "precipitation",
              "p_atm", "co2_ppm")
 
+# ERA5 / ERA5-Land soil temperature layers (depth below surface [cm])
+SOIL_LAYERS = {"t_soil_1": (0, 7), "t_soil_2": (7, 28),
+               "t_soil_3": (28, 100), "t_soil_4": (100, 289)}
+_CDS_SOIL = [f"soil_temperature_level_{i}" for i in range(1, 5)]
+_OM_SOIL = ["soil_temperature_0_to_7cm", "soil_temperature_7_to_28cm",
+            "soil_temperature_28_to_100cm", "soil_temperature_100_to_255cm"]
+
 _ATTRS = {
     "t_air": dict(long_name="Air temperature", units="°C",
                   standard_name="air_temperature"),
@@ -81,6 +88,10 @@ _ATTRS = {
     "co2_ppm": dict(long_name="CO₂ mole fraction", units="ppm",
                     standard_name="mole_fraction_of_carbon_dioxide_in_air"),
 }
+for _k, (_t, _b) in SOIL_LAYERS.items():
+    _ATTRS[_k] = dict(long_name=f"Soil temperature, {_t}-{_b} cm",
+                      units="°C", standard_name="soil_temperature",
+                      depth_top_cm=_t, depth_bottom_cm=_b)
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +133,17 @@ def _build(cols: dict, lat: float, lon: float, co2_ppm: float,
     n = len(cols["time"])
     data = {k: ("time", np.asarray(cols[k], "float32")) for k in VARIABLES[:-1]}
     data["co2_ppm"] = ("time", np.full(n, co2_ppm, "float32"))
+    for k in SOIL_LAYERS:
+        if k in cols:
+            data[k] = ("time", np.asarray(cols[k], "float32"))
     ds = xr.Dataset(
         data,
         coords=dict(time=np.asarray(cols["time"], "datetime64[ns]"),
                     latitude=lat, longitude=lon),
         attrs=attrs)
     for k, a in _ATTRS.items():
-        ds[k].attrs = dict(a)
+        if k in ds:
+            ds[k].attrs = dict(a)
     ds["co2_ppm"].attrs["comment"] = (
         "constant (ERA5 has no CO2); pass co2_ppm= to change")
     if n:
@@ -161,7 +176,7 @@ def _get_json(url, params, tries=4):
         return r.json()
 
 
-def _fetch_openmeteo(lat, lon, start, end, model):
+def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False):
     frames, cell = [], {}
     for a, b in _year_ranges(start, end):
         j = _get_json(OPEN_METEO_URL, dict(
@@ -169,7 +184,8 @@ def _fetch_openmeteo(lat, lon, start, end, model):
             end_date=b.isoformat(), models=model, timezone="GMT",
             wind_speed_unit="ms",
             hourly="temperature_2m,relative_humidity_2m,wind_speed_10m,"
-                   "shortwave_radiation,precipitation,surface_pressure"))
+                   "shortwave_radiation,precipitation,surface_pressure"
+                   + ("," + ",".join(_OM_SOIL) if soil_temp else "")))
         cell = dict(latitude=j["latitude"], longitude=j["longitude"],
                     elevation=j.get("elevation"))
         frames.append(pd.DataFrame(j["hourly"]))
@@ -183,6 +199,9 @@ def _fetch_openmeteo(lat, lon, start, end, model):
         precipitation=np.maximum(df["precipitation"].values, 0.0),
         p_atm=df["surface_pressure"].values * 100.0,        # hPa -> Pa
     )
+    if soil_temp:
+        for k, name in zip(SOIL_LAYERS, _OM_SOIL):
+            cols[k] = df[name].values
     attrs = dict(source="open-meteo", model=model,
                  note="elevation-adjusted by Open-Meteo; values rounded",
                  license="CC BY 4.0 (Open-Meteo, contains modified "
@@ -201,7 +220,7 @@ def _read_cds_file(path) -> xr.Dataset:
     return xr.open_dataset(path).load()
 
 
-def _fetch_cds(lat, lon, start, end, _model):
+def _fetch_cds(lat, lon, start, end, _model, soil_temp=False):
     try:
         import cdsapi
     except ImportError as err:
@@ -214,7 +233,7 @@ def _fetch_cds(lat, lon, start, end, _model):
         for a, b in _year_ranges(start, end):
             path = os.path.join(tmp, f"era5_{a.year}.nc")
             client.retrieve(CDS_DATASET, {
-                "variable": CDS_VARIABLES,
+                "variable": CDS_VARIABLES + (_CDS_SOIL if soil_temp else []),
                 "location": {"longitude": lon, "latitude": lat},
                 "date": [f"{a.isoformat()}/{b.isoformat()}"],
                 "data_format": "netcdf",
@@ -226,6 +245,10 @@ def _fetch_cds(lat, lon, start, end, _model):
     ds = xr.concat(pieces, dim="time")
     cols = from_era5_raw(ds["time"].values,
                          *(ds[_CDS_SHORT[v]].values for v in CDS_VARIABLES))
+    if soil_temp:
+        for k, name in zip(SOIL_LAYERS, _CDS_SOIL):
+            short = "stl" + name[-1]
+            cols[k] = np.asarray(ds[short].values, "float64") - 273.15
     cell = dict(latitude=float(ds.get("latitude", lat)),
                 longitude=float(ds.get("longitude", lon)))
     attrs = dict(source="cds", model="era5",
@@ -250,22 +273,24 @@ def _month_ranges(start: str, end: str):
             yield lo, hi
 
 
-def _fetch_gee(lat, lon, start, end, _model, project=None):
+def _fetch_gee(lat, lon, start, end, _model, soil_temp=False, project=None):
     from get_eo._gee import init_ee
     ee = init_ee(project, need_xee=False)
+    soil = [f"soil_temperature_level_{i}" for i in range(1, 5)] if soil_temp else []
+    names = _GEE_BANDS + soil
     pt = ee.Geometry.Point([lon, lat])
     rows, cell = [], {}
     for lo, hi in _month_ranges(start, end):
         ic = (ee.ImageCollection(GEE_ERA5L)
               .filterDate(lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d"))
-              .select(_GEE_BANDS))
+              .select(names))
         # one row per image: [id, lon, lat, time_ms, band values...]
         tab = ic.getRegion(pt, 11132).getInfo()
         head = tab[0]
         idx = {n: head.index(n) for n in ["longitude", "latitude", "time"]
-               + _GEE_BANDS}
+               + names}
         for r in tab[1:]:
-            if all(r[idx[b]] is not None for b in _GEE_BANDS):
+            if all(r[idx[b]] is not None for b in names):
                 rows.append(r)
                 cell = dict(latitude=r[idx["latitude"]],
                             longitude=r[idx["longitude"]])
@@ -275,6 +300,8 @@ def _fetch_gee(lat, lon, start, end, _model, project=None):
     order = np.argsort(arr["time"])
     t = (arr["time"][order] * 1e6).astype("int64").astype("datetime64[ns]")
     cols = from_era5_raw(t, *(arr[b][order] for b in _GEE_BANDS))
+    for k, b in zip(SOIL_LAYERS, soil):
+        cols[k] = arr[b][order] - 273.15
     attrs = dict(source="gee", model="era5_land", dataset=GEE_ERA5L,
                  license="Contains modified Copernicus Climate Change "
                          "Service information")
@@ -287,6 +314,7 @@ _SOURCES = {"openmeteo": _fetch_openmeteo, "cds": _fetch_cds,
 
 def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
               model: str = "era5", co2_ppm: float = 400.0,
+              soil_temp: bool = False,
               gee_project: str | None = None) -> xr.Dataset:
     """Hourly ERA5 meteorology for the AOI centroid.
 
@@ -299,6 +327,11 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
     source : {'openmeteo', 'cds', 'gee'}
     model : {'era5', 'era5_land'}
         Open-Meteo only. ``era5_land`` is 0.1 degrees (land only).
+    soil_temp : bool
+        Also return ``t_soil_1..4`` [degC], soil temperature of the four
+        ERA5 layers (0-7, 7-28, 28-100, 100-289 cm; ``t_soil_3`` is the
+        usual deep-soil boundary condition). Open-Meteo labels the last
+        layer 100-255 cm.
     gee_project : str, optional
         Google Cloud project for ``source='gee'``.
     co2_ppm : float
@@ -309,7 +342,7 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
     -------
     xr.Dataset
         ``time`` dimension, variables ``t_air rh wind_speed solar_radiation
-        precipitation p_atm co2_ppm``; scalar ``latitude``/``longitude`` of
+        precipitation p_atm co2_ppm`` (plus ``t_soil_1..4`` if asked); scalar ``latitude``/``longitude`` of
         the ERA5 grid cell actually used.
     """
     from get_eo._aoi import resolve_aoi
@@ -324,7 +357,8 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
         lon, lat = c.x, c.y
     fetch = _SOURCES[source]
     kw = {"project": gee_project} if source == "gee" else {}
-    cols, cell, attrs = fetch(lat, lon, start, end, model, **kw)
+    cols, cell, attrs = fetch(lat, lon, start, end, model,
+                              soil_temp=soil_temp, **kw)
     attrs["requested_latitude"], attrs["requested_longitude"] = lat, lon
     if cell.get("elevation") is not None:
         attrs["grid_elevation_m"] = cell["elevation"]

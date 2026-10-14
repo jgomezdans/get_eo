@@ -142,3 +142,14 @@ def test_soilgrids_live():
                            depths=("0-5cm",), buffer_m=1000)
     assert 5 < float(s.clay.mean()) < 70
     assert 4 < float(s.phh2o.mean()) < 9
+
+
+def test_dem_live():
+    d = eox.open_dem(AOI, buffer_m=1000)
+    assert 300 < float(d.elevation.mean()) < 420
+    assert float(d.slope.max()) < 15
+
+
+def test_era5_soil_temp_live():
+    m = eox.open_era5(AOI, "2022-07-15", "2022-07-16", soil_temp=True)
+    assert float(m.t_soil_1.mean()) > float(m.t_soil_4.mean())   # summer: warm top

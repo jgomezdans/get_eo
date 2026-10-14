@@ -13,6 +13,7 @@ SITE = (-96.4701, 41.1649)                      # (lon, lat); or a GeoJSON path,
 obs  = geo.open_aoi(SITE, "2020-01-01", "2020-12-31", buffer_m=1500)
 met  = geo.open_era5(SITE, "2020-01-01", "2020-12-31")      # hourly
 soil = geo.open_soilgrids(SITE, buffer_m=1500)               # 6 depths, 250 m
+dem  = geo.open_dem(SITE, buffer_m=1500)                     # elevation, slope, aspect, 30 m
 
 s2, eco = obs["s2"], obs["ecostress"]           # dask-backed, nothing downloaded yet
 ```
@@ -78,12 +79,25 @@ dimension, for the grid cell at the AOI centroid.
 Timestamps are UTC; solar radiation and precipitation are over the hour
 ending at the timestamp. ERA5 has no CO2, so `co2_ppm` is a constant.
 
+`soil_temp=True` adds `t_soil_1..4` (degC), the four ERA5 soil layers
+(0-7, 7-28, 28-100 and 100-289 cm; layer 3 is the usual deep-soil boundary
+condition). Each carries `depth_top_cm` / `depth_bottom_cm` attributes.
+
 ### `open_soilgrids(aoi, properties=..., depths=..., stats=("mean",))`
 
 SoilGrids 2.0 at 250 m: clay, sand, silt, bdod, cfvo, soc, nitrogen, phh2o,
 cec, ocd at 0-5, 5-15, 15-30, 30-60, 60-100 and 100-200 cm, in conventional
 units, on a UTM grid aligned to multiples of 250 m (nearest neighbour).
 Quantiles and uncertainty via `stats`. Small, so loaded eagerly.
+
+### `open_dem(aoi, source="aws", res=30)`
+
+Copernicus GLO-30 elevation (m), plus `slope` and `aspect` (degrees; aspect
+is the direction the slope faces, clockwise from north) on a UTM grid
+aligned to multiples of `res`, bilinear. `source="aws"` reads the public
+COGs (no account); `source="gee"` uses `COPERNICUS/DEM/GLO30_2024_1`. The
+two agree to a few centimetres. Use `elevation` to correct ERA5 temperature
+and pressure from the grid cell to the field.
 
 ## Notes on the data
 
