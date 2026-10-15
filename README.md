@@ -113,12 +113,12 @@ and pressure from the grid cell to the field.
 
 ## Logging
 
-get_eo is silent by default. To see what it is doing (searches and hit
-counts, which tile was chosen, remote fetches with timings, retries):
+get_eo reports what it is doing at INFO level by default (searches and hit
+counts, which tile was chosen, remote fetches with timings, retries). Change it with:
 
 ```python
 import get_eo as geo
-geo.set_verbosity("INFO")     # or set GET_EO_LOG=INFO in the environment
+geo.set_verbosity("WARNING")  # quieten; or set GET_EO_LOG=WARNING
 geo.set_verbosity("DEBUG")    # very noisy: every window read + GDAL HTTP tracing
 ```
 

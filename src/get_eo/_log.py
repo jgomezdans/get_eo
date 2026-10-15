@@ -1,8 +1,9 @@
 """Logging for get_eo.
 
 Every module logs to ``logging.getLogger(__name__)``, i.e. children of the
-``get_eo`` logger, which carries a ``NullHandler`` so importing the package
-prints nothing. Call :func:`set_verbosity` (or set ``GET_EO_LOG``) to see it:
+``get_eo`` logger. On import, INFO-level messages are sent to stderr; change
+this with :func:`set_verbosity` or the ``GET_EO_LOG`` environment variable
+(``WARNING`` to quieten, ``DEBUG`` for everything):
 
 * ``INFO``: what is being done and how it went (searches and hit counts,
   tile choice, granules kept, one line per remote fetch with timings).
@@ -127,8 +128,7 @@ def short_href(href: str, keep: int = 3) -> str:
     return "/".join(path.rstrip("/").split("/")[-keep:])
 
 
-if os.environ.get(ENV_VAR):
-    try:
-        set_verbosity(os.environ[ENV_VAR])
-    except ValueError:
-        pass
+try:
+    set_verbosity(os.environ.get(ENV_VAR) or "INFO")
+except ValueError:
+    set_verbosity("INFO")

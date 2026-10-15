@@ -18,9 +18,9 @@ Satellite data are dask-backed; nothing is downloaded until ``.compute()``.
 Meteorology and soils are small and loaded eagerly.
 Use :func:`to_zarr_cache` to keep a local copy.
 
-Call ``geo.set_verbosity('INFO')`` (or set ``GET_EO_LOG=INFO``) to see what
-is being fetched and from where; ``'DEBUG'`` adds every read and GDAL's
-HTTP tracing.
+INFO-level progress is logged to stderr by default;
+``geo.set_verbosity("WARNING")`` (or ``GET_EO_LOG=WARNING``) quietens it and
+``"DEBUG"`` adds every read and GDAL's HTTP tracing.
 """
 
 from importlib.metadata import PackageNotFoundError, version
