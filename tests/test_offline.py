@@ -401,3 +401,27 @@ def test_quiet_reductions_match_numpy():
     assert np.isnan(got[0, 0])
     np.testing.assert_allclose(
         nanmean_quiet(a[16:], axis=0), np.nanmean(a[16:], axis=0), rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def test_set_verbosity_logs_and_redacts():
+    import io
+    import logging
+
+    import get_eo as geo
+    from get_eo._log import short_href
+
+    buf = io.StringIO()
+    try:
+        geo.set_verbosity("INFO", stream=buf)
+        logging.getLogger("get_eo.test").info("hello %s", "x?sig=SECRET&a=1")
+        out = buf.getvalue()
+        assert "hello" in out and "SECRET" not in out
+    finally:
+        geo.set_verbosity("WARNING", stream=io.StringIO())
+    assert short_href("https://h/a/b/c/d.tif?sig=SECRET") == "b/c/d.tif"
+    with pytest.raises(ValueError):
+        geo.set_verbosity("LOUD")

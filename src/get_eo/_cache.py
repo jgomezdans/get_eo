@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import time
+
 import numpy as np
 import xarray as xr
 from numcodecs import Zstd
+
+log = logging.getLogger(__name__)
 
 
 def _encoding(ds: xr.Dataset) -> dict:
@@ -37,11 +43,19 @@ def to_zarr_cache(ds: xr.Dataset, path: str) -> None:
     # one zarr chunk == one dask chunk: (1 time, all bands, <=512 x <=512)
     out = out.chunk({d: (1 if d == "time" else -1 if d == "band" else 512)
                      for d in out.dims if d in ("time", "band", "x", "y")})
+    log.info("to_zarr_cache: computing and writing %s to %s (this is where "
+             "the remote reads happen)", dict(out.sizes), path)
+    t0 = time.perf_counter()
     out.to_zarr(path, mode="w", encoding=_encoding(out), consolidated=True)
+    size = sum(os.path.getsize(os.path.join(d, f))
+               for d, _, fs in os.walk(path) for f in fs)
+    log.info("to_zarr_cache: wrote %.1f MB in %.1fs", size / 1e6,
+             time.perf_counter() - t0)
 
 
 def open_cache(path: str) -> xr.Dataset:
     """Open a cache written by :func:`to_zarr_cache` (lazy, dask-backed)."""
+    log.info("open_cache: %s", path)
     ds = xr.open_zarr(path, consolidated=True)
     wkt = ds.attrs.get("crs_wkt")
     return ds.rio.write_crs(wkt) if wkt else ds

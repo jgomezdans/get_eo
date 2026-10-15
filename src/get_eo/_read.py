@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 import dask
 import dask.array as da
 import numpy as np
@@ -10,6 +13,9 @@ from rasterio.windows import Window
 
 from get_eo._env import sign_planetary
 from get_eo._grid import Bounds, TileGrid, chunk_windows
+from get_eo._log import gdal_debug_env, short_href
+
+log = logging.getLogger(__name__)
 
 _SIGNERS = {"planetary": sign_planetary}
 
@@ -62,7 +68,22 @@ def read_window(
         # Use the GDAL path directly: rasterio would otherwise build a
         # boto3 session and ignore the endpoint given in ``gdal_env``.
         href = "/vsis3/" + href[len("s3://"):]
-    with rasterio.Env(**gdal_env), rasterio.open(href) as src:
+    t0 = time.perf_counter()
+    log.debug("read %s window %s", short_href(href), window)
+    try:
+        return _read_window(href, window, gdal_env, expected_transform,
+                            upsample, scale, offset, raw, t0)
+    except Exception as err:
+        log.error("read of %s window %s failed: %s: %s", short_href(href),
+                  window, type(err).__name__, err)
+        raise
+
+
+def _read_window(href, window, gdal_env, expected_transform, upsample, scale,
+                 offset, raw, t0):
+    row0, col0, nrow, ncol = window
+    with (rasterio.Env(**gdal_env, **gdal_debug_env()),
+          rasterio.open(href) as src):
         got = tuple(src.transform)[:6]
         if not np.allclose(got, expected_transform, atol=1e-6):
             raise ValueError(
@@ -80,6 +101,8 @@ def read_window(
     if upsample > 1:
         # Pixel replication: no interpolation of radiometry (D3)
         out = np.repeat(np.repeat(out, upsample, 0), upsample, 1)
+    log.debug("read %s: %s in %.2fs", short_href(href), out.shape,
+              time.perf_counter() - t0)
     return out
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import warnings
 import xml.etree.ElementTree as ET
@@ -19,8 +20,11 @@ from get_eo._assets import (
 from get_eo._env import cdse_s3_client, gdal_env_for, sign_planetary
 from get_eo._geometry import circular_mean_deg, nanmean_quiet, node_slice
 from get_eo._grid import Bounds, TileGrid, aoi_mask
+from get_eo._log import short_href
 from get_eo._read import lazy_layer
 from get_eo._uncertainty import s2_sigma
+
+log = logging.getLogger(__name__)
 
 QUANT = 1e-4  # DN -> reflectance
 
@@ -120,6 +124,8 @@ def _fetch_mtd(href: str, source: str) -> bytes:
     if source == "planetary":
         href = sign_planetary(href)
     r = requests.get(href, timeout=60)
+    log.debug("GET %s: HTTP %d, %d bytes in %.1fs", short_href(href),
+              r.status_code, len(r.content), r.elapsed.total_seconds())
     r.raise_for_status()
     return r.content
 
@@ -135,7 +141,10 @@ def _load_angles(item, source: str, bands, tries: int = 2) -> dict | None:
     for k in range(tries):
         try:
             return s2_angle_grids(_fetch_mtd(href, source), bands)
-        except (ET.ParseError, requests.RequestException, OSError):
+        except (ET.ParseError, requests.RequestException, OSError) as err:
+            log.warning("metadata %s unusable (attempt %d/%d): %s: %s",
+                        short_href(href), k + 1, tries, type(err).__name__,
+                        err)
             if k == tries - 1:
                 return None
             time.sleep(1.5 * (k + 1))
@@ -149,10 +158,15 @@ def _stac_arrays(items, source, grid, bounds, bands, scl_mask, chunk):
                       grid.nx // 2, grid.ny // 2)
 
     # Geometry: read all MTD files up front, in parallel (small, eager)
+    log.info("S2 %s: fetching MTD_TL.xml angle metadata for %d items",
+             source, len(items))
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=8) as pool:
         mtds = list(pool.map(
             lambda it: _load_angles(it, source, bands), items))
     bad = [it.id for it, m in zip(items, mtds) if m is None]
+    log.info("S2 %s: metadata read in %.1fs, %d ok, %d unreadable", source,
+             time.perf_counter() - t0, len(items) - len(bad), len(bad))
     if bad:
         warnings.warn(
             f"Dropped {len(bad)} item(s) whose granule metadata is "
@@ -171,6 +185,8 @@ def _stac_arrays(items, source, grid, bounds, bands, scl_mask, chunk):
     angles = {k: np.stack([m[k][jsl, isl] for m in mtds]).astype("float32")
               for k in ("sun_zen", "sun_az", "view_zen", "view_az")}
 
+    log.info("S2 %s: building lazy arrays for %d items x %d bands "
+             "(no pixels are read yet)", source, len(items), len(bands))
     obs_t, scl_t = [], []
     for it in items:
         hrefs = s2_asset_hrefs(it, source, bands)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import dask.array as da
@@ -17,9 +18,12 @@ from get_eo._geometry import (
     block_median_quiet, fill_nearest, nanmean_quiet,
 )
 from get_eo._grid import Bounds, TileGrid, aoi_mask
+from get_eo._log import gdal_debug_env, short_href
 from get_eo._read import lazy_layer, read_window
 from get_eo._solar import solar_position
 from get_eo._uncertainty import eco_sigma_radiance
+
+log = logging.getLogger(__name__)
 
 BLOCK_PX = 16          # coarse angle grid stride (about 1.1 km)
 MIN_VZA_FOR_AZIMUTH = 1.0
@@ -29,7 +33,9 @@ def eco_grid(item, env: dict) -> TileGrid:
     """Native 70 m tile grid, from one header read of any layer."""
     from pyproj import CRS
     href = next(iter(eco_layer_hrefs(item).values()))
-    with rasterio.Env(**env), rasterio.open(href) as src:
+    log.info("ECOSTRESS: reading tile grid from %s (needs Earthdata login)",
+             short_href(href))
+    with rasterio.Env(**env, **gdal_debug_env()), rasterio.open(href) as src:
         t = src.transform
         return TileGrid(crs=CRS.from_user_input(src.crs.to_wkt()),
                         x0=t.c, y0=t.f, res=t.a, nx=src.width, ny=src.height)
@@ -138,6 +144,8 @@ def eco_geometry(items: list, l2_items: list, grid: TileGrid, bounds: Bounds,
     Orbits with no L2T granule at all get NaN VZA/VAA.
     """
     blocks, ax, ay = block_nodes(grid, bounds)
+    log.info("ECOSTRESS geometry: reading view-zenith over the whole tile "
+             "for %d L2T granules", len(l2_items))
     j0, j1, i0, i1 = blocks
     step = BLOCK_PX * grid.res
     lon, lat = Transformer.from_crs(grid.crs, 4326, always_xy=True).transform(
@@ -205,11 +213,16 @@ def has_data(href: str, grid: TileGrid, bounds: Bounds, env: dict) -> bool:
     row0, col0, nrow, ncol = bounds.pixel_window(grid)
     shape = (min(nrow, 64), min(ncol, 64))
     try:
-        with rasterio.Env(**env), rasterio.open(href) as src:
+        with rasterio.Env(**env, **gdal_debug_env()), \
+                rasterio.open(href) as src:
             a = src.read(1, window=Window(col0, row0, ncol, nrow),
                          out_shape=shape, masked=True)
-        return bool(np.isfinite(a.astype("float32").filled(np.nan)).any())
-    except rasterio.errors.RasterioIOError:
+        ok = bool(np.isfinite(a.astype("float32").filled(np.nan)).any())
+        log.debug("%s: %s", short_href(href), "has data" if ok else "all NaN")
+        return ok
+    except rasterio.errors.RasterioIOError as err:
+        log.warning("cannot read %s (%s); skipping granule. Check network "
+                    "and Earthdata credentials.", short_href(href), err)
         return False
 
 
@@ -227,6 +240,9 @@ def screen_granules(items: list, layer: str, grid: TileGrid, bounds: Bounds,
             if float(sza) > max_sza:
                 continue
         keep.append(it)
+    log.info("ECOSTRESS screening %s: %d of %d granules have the layer%s; "
+             "probing each for data over the AOI", layer, len(keep),
+             len(items), " and are daytime" if day_only else "")
     if not keep:
         return []
     with ThreadPoolExecutor(max_workers=8) as pool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 
 from get_eo._aoi import resolve_aoi
@@ -17,6 +18,8 @@ from get_eo._search import (
     choose_tile, s2_grid, s2_tile_of, search_eco, search_s2,
 )
 from get_eo._assets import parse_eco_id
+
+log = logging.getLogger(__name__)
 
 _S2_NAMES = {"s2", "sentinel2", "sentinel-2"}
 _ECO_NAMES = {"ecostress", "eco"}
@@ -106,6 +109,9 @@ def open_aoi(
     do_eco = bool(want & _ECO_NAMES)
     geom = resolve_aoi(aoi, buffer_m)
     centre = (geom.centroid.x, geom.centroid.y)
+    log.info("open_aoi: %s, %s..%s, AOI centre (%.4f, %.4f), bounds %s",
+             "+".join(sorted(want)), start, end, *centre,
+             tuple(round(b, 4) for b in geom.bounds))
 
     # ---- search -----------------------------------------------------------
     s2_items, eco_l1, eco_l2 = [], [], []
@@ -134,6 +140,7 @@ def open_aoi(
     chosen = tile or choose_tile(geom, grids)
     if chosen not in grids:
         raise LookupError(f"No data found on tile {chosen}")
+    log.info("using tile %s%s", chosen, " (user-specified)" if tile else "")
 
     s2_items = [i for i in s2_items if s2_tile_of(i) == chosen]
     eco_l1 = [i for i in eco_l1 if parse_eco_id(i.id)["tile"] == chosen]
@@ -163,6 +170,9 @@ def open_aoi(
     elif ecog is not None:
         b_eco = aoi_bounds(geom, ecog, ecog.res)
 
+    log.info("on tile %s: %d S2 items, %d ECOSTRESS L1CT, %d L2T-LSTE",
+             chosen, len(s2_items), len(eco_l1), len(eco_l2))
+
     # ---- datasets -----------------------------------------------------------
     out = {}
     if s2_items:
@@ -172,6 +182,8 @@ def open_aoi(
     if eco_l1:
         l1 = screen_granules(eco_l1, "radiance_4", ecog, b_eco, eco_env,
                              centre, day_only)
+        log.info("ECOSTRESS L1CT: %d of %d granules usable over the AOI",
+                 len(l1), len(eco_l1))
         if l1:
             out["ecostress"] = open_ecostress_l1ct(
                 l1, eco_l2, ecog, b_eco, geom, chosen, chunk=chunk,
@@ -179,6 +191,8 @@ def open_aoi(
     if include_lste and eco_l2:
         l2 = screen_granules(eco_l2, "LST", ecog, b_eco, eco_env,
                              centre, day_only)
+        log.info("ECOSTRESS L2T-LSTE: %d of %d granules usable over the AOI",
+                 len(l2), len(eco_l2))
         if l2:
             out["ecostress_lste"] = open_ecostress_lste(
                 l2, ecog, b_eco, geom, chosen, chunk=chunk,
@@ -190,4 +204,6 @@ def open_aoi(
             f"on tile {chosen}")
     for ds in out.values():
         validate_obs_dataset(ds)
+    log.info("open_aoi: returning %s (lazy; data are read on .compute())",
+             ", ".join(f"{k} {dict(v.sizes)}" for k, v in out.items()))
     return out

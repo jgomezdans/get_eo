@@ -38,6 +38,7 @@ Time convention (both sources): timestamps are UTC. ``t_air``, ``rh``,
 from __future__ import annotations
 
 import io
+import logging
 import os
 import time
 import zipfile
@@ -47,6 +48,10 @@ import numpy as np
 import pandas as pd
 import requests
 import xarray as xr
+
+from get_eo._log import timed
+
+log = logging.getLogger(__name__)
 
 OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 CDS_URL = "https://cds.climate.copernicus.eu/api"
@@ -167,11 +172,21 @@ def _year_ranges(start: str, end: str):
 
 def _get_json(url, params, tries=4):
     for k in range(tries):
-        r = requests.get(url, params=params, timeout=120)
+        log.debug("GET %s %s", url, params)
+        try:
+            r = requests.get(url, params=params, timeout=120)
+        except requests.RequestException as err:
+            log.warning("GET %s failed: %s: %s", url, type(err).__name__, err)
+            raise
+        log.debug("HTTP %d, %d bytes in %.1fs", r.status_code, len(r.content),
+                  r.elapsed.total_seconds())
         if r.status_code == 429 and k < tries - 1:
+            log.warning("%s rate-limited (HTTP 429); retry %d/%d in %ds",
+                        url, k + 1, tries - 1, 2 ** (k + 1))
             time.sleep(2 ** (k + 1))
             continue
         if r.status_code != 200:
+            log.error("%s: HTTP %d: %s", url, r.status_code, r.text[:300])
             raise RuntimeError(f"{url}: HTTP {r.status_code}: {r.text[:300]}")
         return r.json()
 
@@ -179,6 +194,8 @@ def _get_json(url, params, tries=4):
 def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False):
     frames, cell = [], {}
     for a, b in _year_ranges(start, end):
+        log.info("Open-Meteo %s: requesting %s..%s at (%.4f, %.4f)",
+                 model, a, b, lon, lat)
         j = _get_json(OPEN_METEO_URL, dict(
             latitude=lat, longitude=lon, start_date=a.isoformat(),
             end_date=b.isoformat(), models=model, timezone="GMT",
@@ -188,6 +205,9 @@ def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False):
                    + ("," + ",".join(_OM_SOIL) if soil_temp else "")))
         cell = dict(latitude=j["latitude"], longitude=j["longitude"],
                     elevation=j.get("elevation"))
+        log.info("Open-Meteo: %d hourly rows; grid cell (%.3f, %.3f), "
+                 "elevation %s m", len(j["hourly"]["time"]), cell["longitude"],
+                 cell["latitude"], cell["elevation"])
         frames.append(pd.DataFrame(j["hourly"]))
     df = pd.concat(frames, ignore_index=True)
     cols = dict(
@@ -232,12 +252,17 @@ def _fetch_cds(lat, lon, start, end, _model, soil_temp=False):
     with tempfile.TemporaryDirectory() as tmp:
         for a, b in _year_ranges(start, end):
             path = os.path.join(tmp, f"era5_{a.year}.nc")
+            log.info("CDS: requesting %s..%s (queued requests can take "
+                     "minutes)", a, b)
+            t0 = time.perf_counter()
             client.retrieve(CDS_DATASET, {
                 "variable": CDS_VARIABLES + (_CDS_SOIL if soil_temp else []),
                 "location": {"longitude": lon, "latitude": lat},
                 "date": [f"{a.isoformat()}/{b.isoformat()}"],
                 "data_format": "netcdf",
             }).download(path)
+            log.info("CDS: downloaded %s..%s in %.0fs (%d bytes)", a, b,
+                     time.perf_counter() - t0, os.path.getsize(path))
             ds = _read_cds_file(path)
             tdim = "valid_time" if "valid_time" in ds.dims else "time"
             ds = ds.squeeze(drop=True)
@@ -281,6 +306,7 @@ def _fetch_gee(lat, lon, start, end, _model, soil_temp=False, project=None):
     pt = ee.Geometry.Point([lon, lat])
     rows, cell = [], {}
     for lo, hi in _month_ranges(start, end):
+        log.info("GEE %s: requesting %s..%s", GEE_ERA5L, lo.date(), hi.date())
         ic = (ee.ImageCollection(GEE_ERA5L)
               .filterDate(lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d"))
               .select(names))
@@ -355,6 +381,9 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
     else:
         c = resolve_aoi(aoi).centroid
         lon, lat = c.x, c.y
+    log.info("open_era5: source=%s model=%s %s..%s at (%.4f, %.4f)%s",
+             source, model, start, end, lon, lat,
+             ", with soil temperature" if soil_temp else "")
     fetch = _SOURCES[source]
     kw = {"project": gee_project} if source == "gee" else {}
     cols, cell, attrs = fetch(lat, lon, start, end, model,
@@ -362,4 +391,9 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
     attrs["requested_latitude"], attrs["requested_longitude"] = lat, lon
     if cell.get("elevation") is not None:
         attrs["grid_elevation_m"] = cell["elevation"]
-    return _build(cols, cell["latitude"], cell["longitude"], co2_ppm, attrs)
+    ds = _build(cols, cell["latitude"], cell["longitude"], co2_ppm, attrs)
+    n_nan = int(sum(int(np.isnan(v.values).sum()) for v in ds.data_vars.values()))
+    log.info("open_era5: %d hourly steps (%s..%s)%s", ds.sizes["time"],
+             ds.attrs.get("time_start"), ds.attrs.get("time_end"),
+             f"; {n_nan} NaN values" if n_nan else "")
+    return ds

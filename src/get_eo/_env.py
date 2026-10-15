@@ -8,11 +8,16 @@ leak configuration into each other.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
 
 import requests
+
+from get_eo._log import gdal_debug_env
+
+log = logging.getLogger(__name__)
 
 COMMON_GDAL_ENV = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
@@ -54,6 +59,7 @@ def cdse_credentials() -> tuple[str, str]:
                 continue
             key = key or cfg.get("s3_access_key", "")
             secret = secret or cfg.get("s3_secret_key", "")
+    log.debug("CDSE S3 keys %s", "found" if key and secret else "NOT found")
     if not (key and secret):
         raise EnvironmentError(
             "CDSE needs S3 keys. Set CDSE_S3_ACCESS_KEY and "
@@ -82,6 +88,7 @@ def gdal_env_for(source: str) -> dict:
     """GDAL config options for ``source``
     ('aws', 'planetary', 'cdse', 'earthdata')."""
     env = dict(COMMON_GDAL_ENV)
+    env.update(gdal_debug_env())
     if source == "aws":
         env["AWS_NO_SIGN_REQUEST"] = "YES"
     elif source == "cdse":
@@ -112,6 +119,8 @@ def check_earthdata_login() -> None:
     if os.path.exists(netrc):
         with open(netrc) as f:
             has_netrc = "urs.earthdata.nasa.gov" in f.read()
+    log.debug("Earthdata credentials in ~/.netrc: %s",
+              "found" if has_netrc else "NOT found")
     if not has_netrc:
         raise EnvironmentError(
             "ECOSTRESS needs NASA Earthdata Login credentials. Add this to "
@@ -131,8 +140,11 @@ def _planetary_token(collection: str = "sentinel-2-l2a") -> str:
         tok = _tokens.get(collection)
         if tok and tok[1] - time.time() > 300:
             return tok[0]
+        log.info("requesting Planetary Computer SAS token for %s", collection)
         r = requests.get(PLANETARY_SAS_URL.format(collection=collection),
                          timeout=30)
+        log.debug("SAS token request: HTTP %d in %.1fs", r.status_code,
+                  r.elapsed.total_seconds())
         r.raise_for_status()
         j = r.json()
         # 'msft:expiry' is ISO-8601; fall back to 30 minutes if absent

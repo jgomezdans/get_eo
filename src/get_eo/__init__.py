@@ -17,6 +17,10 @@ meteorology and SoilGrids soils::
 Satellite data are dask-backed; nothing is downloaded until ``.compute()``.
 Meteorology and soils are small and loaded eagerly.
 Use :func:`to_zarr_cache` to keep a local copy.
+
+Call ``geo.set_verbosity('INFO')`` (or set ``GET_EO_LOG=INFO``) to see what
+is being fetched and from where; ``'DEBUG'`` adds every read and GDAL's
+HTTP tracing.
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -27,6 +31,7 @@ from get_eo._aggregate import aggregate_to
 from get_eo._cache import open_cache, to_zarr_cache
 from get_eo._dem import open_dem
 from get_eo._geometry import angles_at
+from get_eo._log import set_verbosity
 from get_eo._meteo import open_era5
 from get_eo._open import open_aoi
 from get_eo._schema import validate_obs_dataset
@@ -39,5 +44,5 @@ except PackageNotFoundError:    # running from a source tree
 
 __all__ = [
     "__version__", "open_aoi", "open_era5", "open_soilgrids", "open_dem", "aggregate_to", "angles_at",
-    "to_zarr_cache", "open_cache", "validate_obs_dataset",
+    "to_zarr_cache", "open_cache", "validate_obs_dataset", "set_verbosity",
 ]

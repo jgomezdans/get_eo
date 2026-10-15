@@ -111,6 +111,21 @@ and pressure from the grid cell to the field.
   the source is skipped with a warning rather than failing the request.
 * **Caching**: `geo.to_zarr_cache(ds, path)` / `geo.open_cache(path)`.
 
+## Logging
+
+get_eo is silent by default. To see what it is doing (searches and hit
+counts, which tile was chosen, remote fetches with timings, retries):
+
+```python
+import get_eo as geo
+geo.set_verbosity("INFO")     # or set GET_EO_LOG=INFO in the environment
+geo.set_verbosity("DEBUG")    # very noisy: every window read + GDAL HTTP tracing
+```
+
+`DEBUG` is for diagnosing network, proxy and credential problems. Signed-URL
+tokens (`sig=`, `token=`, `X-Amz-*`) are redacted from the output. Messages go
+to the standard `get_eo` logger, so you can also attach your own handlers.
+
 ## Credentials summary
 
 | Service | Where |

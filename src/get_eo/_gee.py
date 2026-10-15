@@ -15,6 +15,7 @@ the same operation as ``upsample=2`` in :mod:`get_eo._read`.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,8 @@ from shapely.geometry.base import BaseGeometry
 from get_eo._assets import S2_BANDS
 from get_eo._geometry import circular_mean_deg, nanmean_quiet
 from get_eo._grid import Bounds, TileGrid
+
+log = logging.getLogger(__name__)
 
 GEE_S2 = "COPERNICUS/S2_SR_HARMONIZED"
 GEE_HIGH_VOLUME = "https://earthengine-highvolume.googleapis.com"
@@ -66,9 +69,13 @@ def init_ee(project: str | None = None, need_xee: bool = True):
         return ee
     project = (project or os.environ.get("EOF_GEE_PROJECT")
                or os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    log.info("initialising Earth Engine (project=%s, endpoint=%s)", project,
+             GEE_HIGH_VOLUME)
     try:
         ee.Initialize(project=project, opt_url=GEE_HIGH_VOLUME)
     except Exception as err:
+        log.error("Earth Engine initialisation failed: %s: %s",
+                  type(err).__name__, err)
         raise EnvironmentError(
             "Google Earth Engine is not initialised. Run "
             "`earthengine authenticate` and pass gee_project=<cloud project> "
@@ -104,13 +111,17 @@ def search_s2_gee(aoi: BaseGeometry, start: str, end: str,
         ic = ic.filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", max_cloud))
     if tile:
         ic = ic.filter(ee.Filter.eq("MGRS_TILE", tile))
+    log.info("GEE search: %s %s..%s%s", GEE_S2, start, end,
+             f" tile {tile}" if tile else "")
     feats = ic.sort("system:time_start").getInfo()["features"]
     items = [_normalise(f) for f in feats]
+    log.info("GEE search: %d images", len(items))
 
     grids: dict[str, dict] = {}
     for it in items:
         t = it.properties["grid:code"]
         if t not in grids:
+            log.debug("GEE: reading grid of tile %s from %s", t, it.id)
             band = ee.Image(it.id).select("B2").getInfo()["bands"][0]
             w, h = band["dimensions"]
             grids[t] = {"proj:code": band["crs"],
@@ -146,6 +157,8 @@ def gee_s2_arrays(items: list[GeeItem], grid: TileGrid, bounds: Bounds,
 
     nrow = int(round((bounds.ymax - bounds.ymin) / grid.res))
     ncol = int(round((bounds.xmax - bounds.xmin) / grid.res))
+    log.info("GEE: opening %d images, %d bands, %dx%d px via xee",
+             len(items), len(names), ncol, nrow)
     ds = xr.open_dataset(
         ic, engine="ee", crs=grid.crs.to_string(),
         crs_transform=(grid.res, 0.0, bounds.xmin, 0.0, -grid.res, bounds.ymax),

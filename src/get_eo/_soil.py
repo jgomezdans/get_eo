@@ -7,6 +7,8 @@ units to conventional ones. The result is small, so it is loaded eagerly.
 
 from __future__ import annotations
 
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -19,6 +21,9 @@ from rasterio.vrt import WarpedVRT
 
 from get_eo._aoi import resolve_aoi
 from get_eo._grid import Bounds, aoi_mask, aoi_to_crs
+from get_eo._log import gdal_debug_env
+
+log = logging.getLogger(__name__)
 
 SOILGRIDS_URL = ("/vsicurl/https://files.isric.org/soilgrids/latest/data/"
                  "{prop}/{prop}_{depth}_{stat}.vrt")
@@ -67,15 +72,19 @@ def _read(prop, depth, stat, crs, bounds: Bounds, res, nx, ny) -> np.ndarray:
     """One property/depth/stat window as float32 in stored units (NaN =
     no data)."""
     dst = Affine(res, 0, bounds.xmin, 0, -res, bounds.ymax)
-    with rasterio.Env(**_ENV):
-        with rasterio.open(SOILGRIDS_URL.format(
-                prop=prop, depth=depth, stat=stat)) as src:
+    url = SOILGRIDS_URL.format(prop=prop, depth=depth, stat=stat)
+    log.debug("reading %s (%dx%d at %g m)", url, nx, ny, res)
+    t0 = time.perf_counter()
+    with rasterio.Env(**_ENV, **gdal_debug_env()):
+        with rasterio.open(url) as src:
             with WarpedVRT(src, crs=crs, transform=dst, width=nx, height=ny,
                            resampling=Resampling.nearest,
                            src_nodata=NODATA, nodata=NODATA) as vrt:
                 a = vrt.read(1)
     out = a.astype("float32")
     out[a == NODATA] = np.nan
+    log.debug("read %s/%s/%s in %.1fs, %.0f%% no-data", prop, depth, stat,
+              time.perf_counter() - t0, 100 * float(np.isnan(out).mean()))
     return out
 
 
@@ -133,10 +142,17 @@ def open_soilgrids(aoi, properties=DEFAULT_PROPERTIES, depths=DEPTHS,
     x, y = bounds.coords(res)
 
     jobs = [(p, d, s) for p in properties for s in stats for d in depths]
+    log.info("open_soilgrids: %d properties x %d depths x %d stats = %d reads "
+             "of %dx%d cells (%g m, %s) from files.isric.org, %d threads",
+             len(properties), len(depths), len(stats), len(jobs), nx, ny,
+             res, crs.to_string(), workers)
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         arrs = dict(zip(jobs, pool.map(
             lambda j: _read(*j, crs, bounds, res, nx, ny), jobs)))
 
+    log.info("open_soilgrids: %d reads done in %.1fs", len(jobs),
+             time.perf_counter() - t0)
     data = {}
     for p in properties:
         div, units, long_name = PROPERTIES[p]

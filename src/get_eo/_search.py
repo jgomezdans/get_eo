@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import warnings
 from collections import defaultdict
@@ -13,6 +14,9 @@ from shapely.geometry.base import BaseGeometry
 
 from get_eo._assets import S2_GRID_KEY, parse_eco_id
 from get_eo._grid import TileGrid, aoi_to_crs
+from get_eo._log import timed
+
+log = logging.getLogger(__name__)
 
 CMR_STAC_URL = "https://cmr.earthdata.nasa.gov/stac/LPCLOUD"
 _S2_STAC = {
@@ -59,14 +63,22 @@ def search_s2(aoi: BaseGeometry, start: str, end: str, source: str = "aws",
         raise ValueError(
             f"Unknown S2 source {source!r}; supported: aws, planetary, "
             "cdse, gee")
-    client = pystac_client.Client.open(_S2_STAC[source])
+    url = _S2_STAC[source]
     kwargs = {}
     if max_cloud < 100:
         kwargs["query"] = {"eo:cloud_cover": {"lte": max_cloud}}
-    search = client.search(
-        collections=["sentinel-2-l2a"], intersects=mapping(aoi),
-        datetime=_datetime_range(start, end), **kwargs)
-    return dedupe_s2(list(search.items()), source)
+    with timed(log, "S2 STAC search on %s (%s, %s..%s, max_cloud=%g)",
+               source, url, start, end, max_cloud):
+        client = pystac_client.Client.open(url)
+        search = client.search(
+            collections=["sentinel-2-l2a"], intersects=mapping(aoi),
+            datetime=_datetime_range(start, end), **kwargs)
+        found = list(search.items())
+    items = dedupe_s2(found, source)
+    log.info("S2 %s: %d items found, %d after de-duplication, tiles: %s",
+             source, len(found), len(items),
+             sorted({s2_tile_of(i) for i in items} - {None}) or "none")
+    return items
 
 
 def dedupe_s2(items: list, source: str) -> list:
@@ -110,6 +122,7 @@ def _grid_from_file(href: str, source: str):
     carry no ``proj:`` metadata (CDSE JP2s)."""
     import rasterio
     from get_eo._env import gdal_env_for
+    log.info("item has no proj: metadata; reading grid from %s", href)
     if href.startswith("s3://"):
         href = "/vsis3/" + href[len("s3://"):]
     with rasterio.Env(**gdal_env_for(source)), rasterio.open(href) as src:
@@ -154,12 +167,15 @@ def search_eco(aoi: BaseGeometry, start: str, end: str, product: str = "L1CT_RAD
     Item properties carry no cloud/angle information, so the only filters
     are time, tile and footprint. Duplicate builds are collapsed.
     """
-    client = pystac_client.Client.open(CMR_STAC_URL)
-    search = client.search(
-        collections=[f"ECO_{product}_{version}"], bbox=aoi.bounds,
-        datetime=_datetime_range(start, end))
+    with timed(log, "ECOSTRESS %s v%s STAC search on CMR (%s..%s)",
+               product, version, start, end):
+        client = pystac_client.Client.open(CMR_STAC_URL)
+        search = client.search(
+            collections=[f"ECO_{product}_{version}"], bbox=aoi.bounds,
+            datetime=_datetime_range(start, end))
+        found = list(search.items())
     best: dict[tuple, tuple] = {}
-    for it in search.items():
+    for it in found:
         try:
             f = parse_eco_id(it.id)
         except ValueError:
@@ -172,7 +188,12 @@ def search_eco(aoi: BaseGeometry, start: str, end: str, product: str = "L1CT_RAD
         rank = (f["build"], f["rev"])
         if key not in best or rank > best[key][0]:
             best[key] = (rank, it)
-    return sorted((v[1] for v in best.values()), key=lambda i: parse_eco_id(i.id)["start"])
+    out = sorted((v[1] for v in best.values()),
+                 key=lambda i: parse_eco_id(i.id)["start"])
+    log.info("ECOSTRESS %s: %d granules found, %d kept (on AOI%s, "
+             "latest build)", product, len(found), len(out),
+             f", tile {tile}" if tile else "")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +219,8 @@ def choose_tile(aoi: BaseGeometry, grids: dict[str, TileGrid]) -> str:
         scored.append((round(cover, 6), interior, name))
     scored.sort(reverse=True)
     best = scored[0]
+    log.info("tile candidates (AOI cover, name): %s",
+             ", ".join(f"{n} {c:.0%}" for c, _, n in scored))
     if best[0] < 1.0 - 1e-6:
         warnings.warn(
             f"AOI is not fully inside any single tile; using {best[2]} "

@@ -11,7 +11,9 @@ the output grid. Sources:
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 
 import numpy as np
 import rasterio
@@ -24,7 +26,10 @@ from rasterio.vrt import WarpedVRT
 
 from get_eo._aoi import resolve_aoi
 from get_eo._grid import Bounds, aoi_mask, aoi_to_crs
+from get_eo._log import gdal_debug_env
 from get_eo._soil import snap_bounds, utm_crs_for
+
+log = logging.getLogger(__name__)
 
 AWS_URL = ("https://copernicus-dem-30m.s3.amazonaws.com/{name}/{name}.tif")
 GEE_DEM = "COPERNICUS/DEM/GLO30_2024_1"
@@ -69,11 +74,19 @@ def slope_aspect(z: np.ndarray, res: float):
 def _read_aws(geom, crs, bounds: Bounds, res: float, nx: int, ny: int):
     dst = Affine(res, 0, bounds.xmin, 0, -res, bounds.ymax)
     out = np.full((ny, nx), np.nan, "float32")
-    with rasterio.Env(**_ENV):
-        for name in tiles_for(*geom.bounds):
+    names = tiles_for(*geom.bounds)
+    log.info("DEM: reading %d Copernicus GLO-30 tile(s) from AWS: %s",
+             len(names), ", ".join(names))
+    with rasterio.Env(**_ENV, **gdal_debug_env()):
+        for name in names:
+            url = AWS_URL.format(name=name)
+            t0 = time.perf_counter()
             try:
-                src = rasterio.open(AWS_URL.format(name=name))
-            except RasterioIOError:         # no tile (open ocean)
+                src = rasterio.open(url)
+            except RasterioIOError as err:  # no tile (open ocean)
+                log.warning("DEM tile %s not available (%s); treating as "
+                            "no data. If you expected land here, check "
+                            "your network: %s", name, err, url)
                 continue
             with src, WarpedVRT(src, crs=crs, transform=dst, width=nx,
                                 height=ny, resampling=Resampling.bilinear,
@@ -81,6 +94,8 @@ def _read_aws(geom, crs, bounds: Bounds, res: float, nx: int, ny: int):
                 a = vrt.read(1)
             ok = a != _NODATA
             out[ok] = a[ok]
+            log.debug("DEM tile %s: %.0f%% valid, %.1fs", name,
+                      100 * float(ok.mean()), time.perf_counter() - t0)
     return out
 
 
@@ -90,6 +105,8 @@ def _read_gee(geom, crs, bounds: Bounds, res: float, nx: int, ny: int,
 
     from get_eo._gee import init_ee
     ee = init_ee(project, need_xee=False)
+    log.info("DEM: requesting %dx%d px of %s from Earth Engine", nx, ny,
+             GEE_DEM)
     ic = ee.ImageCollection(GEE_DEM).select("DEM")
     img = (ic.mosaic().setDefaultProjection(ic.first().projection())
            .resample("bilinear"))
@@ -143,8 +160,12 @@ def open_dem(aoi, *, source: str = "aws", buffer_m: float | None = None,
     xs, ys = t.transform([m.xmin, m.xmax, m.xmin, m.xmax],
                          [m.ymin, m.ymin, m.ymax, m.ymax])
     ll = box(min(xs), min(ys), max(xs), max(ys))
+    log.info("open_dem: source=%s, %dx%d cells at %g m (%s)", source,
+             nx - 2, ny - 2, res, crs.to_string())
     z = (_read_aws(ll, crs, m, res, nx, ny) if source == "aws"
          else _read_gee(ll, crs, m, res, nx, ny, gee_project))
+    if np.isnan(z).all():
+        log.warning("open_dem: no elevation data at all over the AOI")
     slope, aspect = slope_aspect(z, res)
     inner = (slice(1, -1), slice(1, -1))
     x, y = b.coords(res)
