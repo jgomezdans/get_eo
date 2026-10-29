@@ -72,6 +72,12 @@ VARIABLES = ("t_air", "rh", "wind_speed", "solar_radiation", "precipitation",
 # ERA5 / ERA5-Land soil temperature layers (depth below surface [cm])
 SOIL_LAYERS = {"t_soil_1": (0, 7), "t_soil_2": (7, 28),
                "t_soil_3": (28, 100), "t_soil_4": (100, 289)}
+# ERA5 / ERA5-Land volumetric soil water layers, same depths [cm]
+SWC_LAYERS = {"swc_1": (0, 7), "swc_2": (7, 28),
+              "swc_3": (28, 100), "swc_4": (100, 289)}
+_CDS_SWC = [f"volumetric_soil_water_layer_{i}" for i in range(1, 5)]
+_OM_SWC = ["soil_moisture_0_to_7cm", "soil_moisture_7_to_28cm",
+           "soil_moisture_28_to_100cm", "soil_moisture_100_to_255cm"]
 _CDS_SOIL = [f"soil_temperature_level_{i}" for i in range(1, 5)]
 _OM_SOIL = ["soil_temperature_0_to_7cm", "soil_temperature_7_to_28cm",
             "soil_temperature_28_to_100cm", "soil_temperature_100_to_255cm"]
@@ -93,6 +99,10 @@ _ATTRS = {
     "co2_ppm": dict(long_name="CO₂ mole fraction", units="ppm",
                     standard_name="mole_fraction_of_carbon_dioxide_in_air"),
 }
+for _k, (_t, _b) in SWC_LAYERS.items():
+    _ATTRS[_k] = dict(long_name=f"Volumetric soil water, {_t}-{_b} cm",
+                      units="m3 m-3", standard_name="soil_moisture_content",
+                      depth_top_cm=_t, depth_bottom_cm=_b)
 for _k, (_t, _b) in SOIL_LAYERS.items():
     _ATTRS[_k] = dict(long_name=f"Soil temperature, {_t}-{_b} cm",
                       units="°C", standard_name="soil_temperature",
@@ -138,7 +148,7 @@ def _build(cols: dict, lat: float, lon: float, co2_ppm: float,
     n = len(cols["time"])
     data = {k: ("time", np.asarray(cols[k], "float32")) for k in VARIABLES[:-1]}
     data["co2_ppm"] = ("time", np.full(n, co2_ppm, "float32"))
-    for k in SOIL_LAYERS:
+    for k in (*SOIL_LAYERS, *SWC_LAYERS):
         if k in cols:
             data[k] = ("time", np.asarray(cols[k], "float32"))
     ds = xr.Dataset(
@@ -191,7 +201,8 @@ def _get_json(url, params, tries=4):
         return r.json()
 
 
-def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False):
+def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False,
+                     soil_moisture=False):
     frames, cell = [], {}
     for a, b in _year_ranges(start, end):
         log.info("Open-Meteo %s: requesting %s..%s at (%.4f, %.4f)",
@@ -202,7 +213,8 @@ def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False):
             wind_speed_unit="ms",
             hourly="temperature_2m,relative_humidity_2m,wind_speed_10m,"
                    "shortwave_radiation,precipitation,surface_pressure"
-                   + ("," + ",".join(_OM_SOIL) if soil_temp else "")))
+                   + ("," + ",".join(_OM_SOIL) if soil_temp else "")
+                   + ("," + ",".join(_OM_SWC) if soil_moisture else "")))
         cell = dict(latitude=j["latitude"], longitude=j["longitude"],
                     elevation=j.get("elevation"))
         log.info("Open-Meteo: %d hourly rows; grid cell (%.3f, %.3f), "
@@ -222,6 +234,9 @@ def _fetch_openmeteo(lat, lon, start, end, model, soil_temp=False):
     if soil_temp:
         for k, name in zip(SOIL_LAYERS, _OM_SOIL):
             cols[k] = df[name].values
+    if soil_moisture:
+        for k, name in zip(SWC_LAYERS, _OM_SWC):
+            cols[k] = df[name].values
     attrs = dict(source="open-meteo", model=model,
                  note="elevation-adjusted by Open-Meteo; values rounded",
                  license="CC BY 4.0 (Open-Meteo, contains modified "
@@ -240,7 +255,8 @@ def _read_cds_file(path) -> xr.Dataset:
     return xr.open_dataset(path).load()
 
 
-def _fetch_cds(lat, lon, start, end, _model, soil_temp=False):
+def _fetch_cds(lat, lon, start, end, _model, soil_temp=False,
+               soil_moisture=False):
     try:
         import cdsapi
     except ImportError as err:
@@ -256,7 +272,8 @@ def _fetch_cds(lat, lon, start, end, _model, soil_temp=False):
                      "minutes)", a, b)
             t0 = time.perf_counter()
             client.retrieve(CDS_DATASET, {
-                "variable": CDS_VARIABLES + (_CDS_SOIL if soil_temp else []),
+                "variable": CDS_VARIABLES + (_CDS_SOIL if soil_temp else [])
+                + (_CDS_SWC if soil_moisture else []),
                 "location": {"longitude": lon, "latitude": lat},
                 "date": [f"{a.isoformat()}/{b.isoformat()}"],
                 "data_format": "netcdf",
@@ -274,6 +291,9 @@ def _fetch_cds(lat, lon, start, end, _model, soil_temp=False):
         for k, name in zip(SOIL_LAYERS, _CDS_SOIL):
             short = "stl" + name[-1]
             cols[k] = np.asarray(ds[short].values, "float64") - 273.15
+    if soil_moisture:
+        for k, name in zip(SWC_LAYERS, _CDS_SWC):
+            cols[k] = np.asarray(ds["swvl" + name[-1]].values, "float64")
     cell = dict(latitude=float(ds.get("latitude", lat)),
                 longitude=float(ds.get("longitude", lon)))
     attrs = dict(source="cds", model="era5",
@@ -298,11 +318,14 @@ def _month_ranges(start: str, end: str):
             yield lo, hi
 
 
-def _fetch_gee(lat, lon, start, end, _model, soil_temp=False, project=None):
+def _fetch_gee(lat, lon, start, end, _model, soil_temp=False,
+               soil_moisture=False, project=None):
     from get_eo._gee import init_ee
     ee = init_ee(project, need_xee=False)
     soil = [f"soil_temperature_level_{i}" for i in range(1, 5)] if soil_temp else []
-    names = _GEE_BANDS + soil
+    swc = ([f"volumetric_soil_water_layer_{i}" for i in range(1, 5)]
+           if soil_moisture else [])
+    names = _GEE_BANDS + soil + swc
     pt = ee.Geometry.Point([lon, lat])
     rows, cell = [], {}
     for lo, hi in _month_ranges(start, end):
@@ -328,6 +351,8 @@ def _fetch_gee(lat, lon, start, end, _model, soil_temp=False, project=None):
     cols = from_era5_raw(t, *(arr[b][order] for b in _GEE_BANDS))
     for k, b in zip(SOIL_LAYERS, soil):
         cols[k] = arr[b][order] - 273.15
+    for k, b in zip(SWC_LAYERS, swc):
+        cols[k] = arr[b][order]
     attrs = dict(source="gee", model="era5_land", dataset=GEE_ERA5L,
                  license="Contains modified Copernicus Climate Change "
                          "Service information")
@@ -340,7 +365,7 @@ _SOURCES = {"openmeteo": _fetch_openmeteo, "cds": _fetch_cds,
 
 def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
               model: str = "era5", co2_ppm: float = 400.0,
-              soil_temp: bool = False,
+              soil_temp: bool = False, soil_moisture: bool = False,
               gee_project: str | None = None) -> xr.Dataset:
     """Hourly ERA5 meteorology for the AOI centroid.
 
@@ -358,6 +383,12 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
         ERA5 layers (0-7, 7-28, 28-100, 100-289 cm; ``t_soil_3`` is the
         usual deep-soil boundary condition). Open-Meteo labels the last
         layer 100-255 cm.
+    soil_moisture : bool
+        Also return ``swc_1..4`` [m3 m-3], volumetric soil water of the four
+        ERA5(-Land) layers (same depths as ``soil_temp``). Instantaneous
+        values at the timestamp. GEE bands
+        ``volumetric_soil_water_layer_1..4``; Open-Meteo ``soil_moisture_*``
+        (last layer 100-255 cm); CDS ``volumetric_soil_water_layer_1..4``.
     gee_project : str, optional
         Google Cloud project for ``source='gee'``.
     co2_ppm : float
@@ -387,7 +418,8 @@ def open_era5(aoi, start: str, end: str, *, source: str = "openmeteo",
     fetch = _SOURCES[source]
     kw = {"project": gee_project} if source == "gee" else {}
     cols, cell, attrs = fetch(lat, lon, start, end, model,
-                              soil_temp=soil_temp, **kw)
+                              soil_temp=soil_temp,
+                              soil_moisture=soil_moisture, **kw)
     attrs["requested_latitude"], attrs["requested_longitude"] = lat, lon
     if cell.get("elevation") is not None:
         attrs["grid_elevation_m"] = cell["elevation"]

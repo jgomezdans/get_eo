@@ -153,3 +153,11 @@ def test_dem_live():
 def test_era5_soil_temp_live():
     m = eox.open_era5(AOI, "2022-07-15", "2022-07-16", soil_temp=True)
     assert float(m.t_soil_1.mean()) > float(m.t_soil_4.mean())   # summer: warm top
+
+
+@pytest.mark.network
+def test_era5_soil_moisture_gee_live():
+    m = eox.open_era5(AOI, "2022-07-15", "2022-07-16", source="gee",
+                      soil_moisture=True)
+    for i in range(1, 5):
+        assert 0.05 < float(m[f"swc_{i}"].mean()) < 0.6

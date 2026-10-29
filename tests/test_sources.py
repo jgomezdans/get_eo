@@ -465,3 +465,27 @@ def test_open_dem_grid_and_crop(monkeypatch):
     assert ds.rio.crs.to_epsg() == 32614
     with pytest.raises(ValueError, match="Unknown DEM source"):
         _dem.open_dem((0.0, 0.0), source="x", buffer_m=100)
+
+
+def test_era5_openmeteo_soil_moisture(monkeypatch):
+    seen = []
+
+    def fake(url, params, tries=4):
+        seen.append(params["hourly"])
+        h = dict(time=["2022-07-15T00:00"], temperature_2m=[20.0],
+                 relative_humidity_2m=[50], wind_speed_10m=[1.0],
+                 shortwave_radiation=[0.0], precipitation=[0.0],
+                 surface_pressure=[970.0])
+        for i, name in enumerate(_meteo._OM_SWC):
+            h[name] = [0.30 - 0.02 * i]
+        return dict(latitude=41.25, longitude=-96.5, hourly=h)
+
+    monkeypatch.setattr(_meteo, "_get_json", fake)
+    ds = _meteo.open_era5((-96.47, 41.16), "2022-07-15", "2022-07-15",
+                          soil_moisture=True)
+    assert "soil_moisture_0_to_7cm" in seen[0]
+    assert [float(ds[f"swc_{i}"].values[0]) for i in range(1, 5)] == pytest.approx(
+        [0.30, 0.28, 0.26, 0.24])
+    assert ds.swc_1.attrs["units"] == "m3 m-3"
+    assert "swc_1" not in _meteo.open_era5(
+        (-96.47, 41.16), "2022-07-15", "2022-07-15")
