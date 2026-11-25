@@ -99,6 +99,24 @@ COGs (no account); `source="gee"` uses `COPERNICUS/DEM/GLO30_2024_1`. The
 two agree to a few centimetres. Use `elevation` to correct ERA5 temperature
 and pressure from the grid cell to the field.
 
+### `snap_biophys(s2, variables=...)` and `vegetation_indices(s2, indices=...)`
+
+Derived products from the `s2` dataset, both lazy and on the same
+`(time, y, x)` grid (cloud/shadow/snow pixels from `valid` are NaN):
+
+```python
+bio = geo.snap_biophys(s2)                  # lai, fapar, fcover, lai_cab, lai_cw
+vi  = geo.vegetation_indices(s2)            # ndvi, ci_red_edge, gcc
+```
+
+`snap_biophys` is a port of the ESA SNAP Sentinel-2 Toolbox biophysical
+processor (v2.1 neural networks; ATBD at step.esa.int). It needs bands
+B03, B04, B05, B06, B07, B8A, B11, B12 (all in the default `bands`) and
+the angle grids; view/sun geometry is interpolated per dask block.
+Pixels outside the networks' training domain are NaN; the convex-hull
+check of the Java processor is not applied. No uncertainty is produced
+(attributes carry the published RMSE). NDVI uses B08 and B04.
+
 ## Notes on the data
 
 * **Sentinel-2 on AWS** already has the -1000 DN BOA offset applied in the

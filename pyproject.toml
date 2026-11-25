@@ -34,8 +34,7 @@ dependencies = [
     "shapely",
     "pystac-client",
     "requests",
-    "zarr<3",
-    "numcodecs",
+    "zarr>=3",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +49,9 @@ Documentation = "https://github.com/jgomezdans/get_eo#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+get_eo = ["_snap_data/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
