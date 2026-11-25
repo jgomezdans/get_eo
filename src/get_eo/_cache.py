@@ -8,13 +8,13 @@ import time
 
 import numpy as np
 import xarray as xr
-from numcodecs import Zstd
+from zarr.codecs import ZstdCodec
 
 log = logging.getLogger(__name__)
 
 
 def _encoding(ds: xr.Dataset) -> dict:
-    comp = Zstd(level=3)
+    comp = (ZstdCodec(level=3),)
     enc = {}
     for name, v in ds.data_vars.items():
         if v.ndim >= 2:
@@ -23,7 +23,7 @@ def _encoding(ds: xr.Dataset) -> dict:
             if "band" in v.dims:
                 chunks = tuple(s if d == "band" else c
                                for d, s, c in zip(v.dims, v.shape, chunks))
-            enc[name] = dict(compressor=comp, chunks=chunks)
+            enc[name] = dict(compressors=comp, chunks=chunks)
     # S2 reflectance: int16 with scale_factor keeps ~1e-4 precision at half
     # the size. Radiance stays float32.
     if ds.attrs.get("obs_kind") == "reflectance" and "obs" in ds:
@@ -37,6 +37,11 @@ def to_zarr_cache(ds: xr.Dataset, path: str) -> None:
     crs = ds.rio.crs
     out = ds.drop_vars([v for v in ("spatial_ref",) if v in ds.coords],
                        errors="ignore")
+    # Drop encodings inherited from a previously opened store (e.g. zarr 2
+    # compressors/filters), which the zarr 3 writer rejects.
+    out = out.copy()
+    for v in out.variables.values():
+        v.encoding = {}
     out.attrs = dict(out.attrs, crs_wkt=crs.to_wkt() if crs else "")
     out.attrs = {k: (str(v) if not isinstance(v, (int, float, str)) else v)
                  for k, v in out.attrs.items()}
@@ -46,7 +51,8 @@ def to_zarr_cache(ds: xr.Dataset, path: str) -> None:
     log.info("to_zarr_cache: computing and writing %s to %s (this is where "
              "the remote reads happen)", dict(out.sizes), path)
     t0 = time.perf_counter()
-    out.to_zarr(path, mode="w", encoding=_encoding(out), consolidated=True)
+    out.to_zarr(path, mode="w", encoding=_encoding(out), zarr_format=3,
+              consolidated=False)
     size = sum(os.path.getsize(os.path.join(d, f))
                for d, _, fs in os.walk(path) for f in fs)
     log.info("to_zarr_cache: wrote %.1f MB in %.1fs", size / 1e6,
@@ -56,6 +62,9 @@ def to_zarr_cache(ds: xr.Dataset, path: str) -> None:
 def open_cache(path: str) -> xr.Dataset:
     """Open a cache written by :func:`to_zarr_cache` (lazy, dask-backed)."""
     log.info("open_cache: %s", path)
-    ds = xr.open_zarr(path, consolidated=True)
+    try:                        # older zarr 2 caches are consolidated
+        ds = xr.open_zarr(path, consolidated=True)
+    except Exception:           # zarr 3 caches are written unconsolidated
+        ds = xr.open_zarr(path, consolidated=False)
     wkt = ds.attrs.get("crs_wkt")
     return ds.rio.write_crs(wkt) if wkt else ds

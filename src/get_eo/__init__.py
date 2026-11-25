@@ -14,6 +14,9 @@ meteorology and SoilGrids soils::
     soil = geo.open_soilgrids("field.geojson")   # clay, sand, ... by depth
     dem = geo.open_dem("field.geojson")          # elevation, slope, aspect
 
+    bio = geo.snap_biophys(data["s2"])           # SNAP LAI, FAPAR, FCOVER, ...
+    vi = geo.vegetation_indices(data["s2"])      # NDVI, CI red edge, GCC
+
 Satellite data are dask-backed; nothing is downloaded until ``.compute()``.
 Meteorology and soils are small and loaded eagerly.
 Use :func:`to_zarr_cache` to keep a local copy.
@@ -35,6 +38,7 @@ from get_eo._log import set_verbosity
 from get_eo._meteo import open_era5
 from get_eo._open import open_aoi
 from get_eo._schema import validate_obs_dataset
+from get_eo._snap import snap_biophys, vegetation_indices
 from get_eo._soil import open_soilgrids
 
 try:
@@ -45,4 +49,5 @@ except PackageNotFoundError:    # running from a source tree
 __all__ = [
     "__version__", "open_aoi", "open_era5", "open_soilgrids", "open_dem", "aggregate_to", "angles_at",
     "to_zarr_cache", "open_cache", "validate_obs_dataset", "set_verbosity",
+    "snap_biophys", "vegetation_indices",
 ]
